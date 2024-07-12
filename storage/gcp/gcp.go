@@ -69,6 +69,8 @@ type Storage struct {
 	objStore  objStore
 
 	queue *storage.Queue
+
+	cpSigner func(ctx context.Context, size uint64, root []byte) ([]byte, error)
 }
 
 // objStore describes a type which can store and retrieve objects.
@@ -96,7 +98,7 @@ type Config struct {
 }
 
 // New creates a new instance of the GCP based Storage.
-func New(ctx context.Context, cfg Config) (*Storage, error) {
+func New(ctx context.Context, cfg Config, cpSigner func(ctx context.Context, size uint64, root []byte) ([]byte, error)) (*Storage, error) {
 	c, err := gcs.NewClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCS client: %v", err)
@@ -116,6 +118,7 @@ func New(ctx context.Context, cfg Config) (*Storage, error) {
 		bucket:    cfg.Bucket,
 		objStore:  gcsStorage,
 		sequencer: seq,
+		cpSigner:  cpSigner,
 	}
 	// TODO(al): make queue options configurable:
 	r.queue = storage.NewQueue(time.Second, 256, r.sequencer.assignEntries)
@@ -442,6 +445,15 @@ func (s *Storage) integrate(ctx context.Context, fromSeq uint64, entries [][]byt
 		}
 		//TODO: write out checkpoint
 		klog.Infof("New CP: %d, %x", newSize, newRoot)
+		cpRaw, err := s.cpSigner(ctx, newSize, newRoot)
+		if err != nil {
+			return fmt.Errorf("cpSigner: %v", err)
+		}
+		//TODO: add generation precondition for checkpoint?
+		if err := s.objStore.setObject(ctx, layout.CheckpointPath, cpRaw, nil); err != nil {
+			return fmt.Errorf("write checkpoint failed: %v", err)
+		}
+
 		return nil
 	})
 
