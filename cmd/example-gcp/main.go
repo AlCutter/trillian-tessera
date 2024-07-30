@@ -74,6 +74,12 @@ func main() {
 		klog.Exitf("Failed to create new GCP storage: %v", err)
 	}
 
+	gcpDedup, err := gcp.NewDedupeStorage(ctx, fmt.Sprintf("%s_dedup", *spanner))
+	if err != nil {
+		klog.Exitf("Failed to create new GCP dedupe storage: %v", err)
+	}
+	dedup := tessera.NewDeduper(ctx, gcpDedup)
+
 	http.HandleFunc("POST /add", func(w http.ResponseWriter, r *http.Request) {
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -83,6 +89,14 @@ func main() {
 		defer r.Body.Close()
 
 		id := sha256.Sum256(b)
+		if idx, err := dedup.Index(r.Context(), id[:]); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(err.Error()))
+			return
+		} else if idx != nil {
+			_, _ = w.Write([]byte(fmt.Sprintf("%d", *idx)))
+			return
+		}
 		idx, err := storage.Add(r.Context(), tessera.NewEntry(b, tessera.WithIdentity(id[:])))()
 		if err != nil {
 			if errors.Is(err, tessera.ErrPushback) {
@@ -95,6 +109,9 @@ func main() {
 			return
 		}
 		_, _ = w.Write([]byte(fmt.Sprintf("%d", idx)))
+		if err := dedup.Set(r.Context(), id[:], idx); err != nil {
+			klog.Warningf("Failed to set dedup %x -> %d: %v", id, idx, err)
+		}
 	})
 
 	// TODO: remove this proxy
