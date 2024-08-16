@@ -29,10 +29,15 @@ resource "google_project_iam_member" "iam_metrics_writer" {
   role    = "roles/monitoring.metricWriter"
   member  = "serviceAccount:${google_service_account.cloudrun_service_account.email}"
 }
-resource "google_project_iam_member" "iam_spanner_database_user" {
-  project = var.project_id
-  role    = "roles/spanner.databaseUser"
-  member  = "serviceAccount:${google_service_account.cloudrun_service_account.email}"
+resource "google_spanner_database_iam_binding" "iam_spanner_database_user" {
+  project  = var.project_id
+  instance = module.gcp.log_spanner_instance.name
+  database = module.gcp.log_spanner_db.name
+  role     = "roles/spanner.databaseUser"
+
+  members = [
+    "serviceAccount:${google_service_account.cloudrun_service_account.email}"
+  ]
 }
 resource "google_project_iam_member" "iam_service_agent" {
   project = var.project_id
@@ -54,7 +59,7 @@ resource "google_cloud_run_v2_service" "default" {
         "--logtostderr",
         "--v=1",
         "--bucket=${module.gcp.log_bucket.id}",
-        "--spanner=${module.gcp.log_spanner.id}",
+        "--spanner=${module.gcp.log_spanner_db.id}",
         "--project=${var.project_id}",
         "--signer=./testgcp.sec",
       ]
@@ -82,8 +87,8 @@ resource "google_cloud_run_v2_service" "default" {
   depends_on = [
     google_project_iam_member.iam_act_as,
     google_project_iam_member.iam_metrics_writer,
-    google_project_iam_member.iam_spanner_database_user,
     google_project_iam_member.iam_service_agent,
+    google_spanner_database_iam_binding.iam_spanner_database_user,
   ]
 }
 
