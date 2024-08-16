@@ -1,7 +1,3 @@
-terraform {
-  backend "gcs" {}
-}
-
 # Services
 resource "google_project_service" "serviceusage_googleapis_com" {
   service            = "serviceusage.googleapis.com"
