@@ -2,6 +2,9 @@ terraform {
   backend "gcs" {}
 }
 
+## Call the Tessera GCP module
+##
+## This will configure all the storage infrastructure required to run a Tessera log on GCP.
 module "gcp" {
   source = "..//gcp"
 
@@ -9,6 +12,12 @@ module "gcp" {
   env        = var.env
   location   = var.location
   project_id = var.project_id
+}
+
+# Enable Cloud Run API
+resource "google_project_service" "cloudrun_api" {
+  service            = "run.googleapis.com"
+  disable_on_destroy = false
 }
 
 ###
