@@ -2,27 +2,15 @@ terraform {
   source = "${get_repo_root()}/deployment/modules/example-gcp"
 }
 
-locals {
-  project_id = get_env("GOOGLE_PROJECT", "trillian-tessera")
-  location   = get_env("GOOGLE_REGION", "us-central1")
-  base_name   = get_env("TESSERA_BASE_NAME", "example-gcp")
+include "root" {
+  path   = find_in_parent_folders()
+  expose = true
 }
 
 inputs = merge(
-  local,
-  {}
+  include.root.locals,
+  {
+    example_docker_image = "todo"
+  }
 )
 
-remote_state {
-  backend = "gcs"
-
-  config = {
-    project  = local.project_id
-    location = local.location
-    bucket   = "${local.project_id}-${local.base_name}-terraform-state"
-
-    gcs_bucket_labels = {
-      name  = "terraform_state_storage"
-    }
-  }
-}

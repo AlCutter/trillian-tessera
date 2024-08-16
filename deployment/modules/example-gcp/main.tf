@@ -2,12 +2,8 @@ terraform {
   backend "gcs" {}
 }
 
-module "infra" {
-  source = "../../../modules/gcp"
-
-  project_id = var.project_id
-  base_name  = var.base_name
-  location   = var.location
+module "gcp" {
+  source = "../"
 }
 
 ###
