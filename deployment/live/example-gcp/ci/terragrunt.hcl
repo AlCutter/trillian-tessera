@@ -1,5 +1,5 @@
 terraform {
-  source = "${get_repo_root()}/deployment/modules/example-gcp"
+  source = "${get_repo_root()}/deployment/modules//example-gcp"
 }
 
 include "root" {
@@ -10,7 +10,7 @@ include "root" {
 inputs = merge(
   include.root.locals,
   {
-    example_docker_image = "todo"
+    example_gcp_docker_image = "todo"
   }
 )
 

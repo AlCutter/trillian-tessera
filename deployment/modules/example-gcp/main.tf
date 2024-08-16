@@ -3,7 +3,12 @@ terraform {
 }
 
 module "gcp" {
-  source = "../"
+  source = "..//gcp"
+
+  base_name  = var.base_name
+  env        = var.env
+  location   = var.location
+  project_id = var.project_id
 }
 
 ###
@@ -24,19 +29,14 @@ resource "google_project_iam_member" "iam_metrics_writer" {
   role    = "roles/monitoring.metricWriter"
   member  = "serviceAccount:${google_service_account.cloudrun_service_account.email}"
 }
-resource "google_project_iam_member" "iam_sql_client" {
+resource "google_project_iam_member" "iam_spanner_client" {
   project = var.project_id
-  role    = "roles/cloudsql.client"
+  role    = "roles/spanner.client"
   member  = "serviceAccount:${google_service_account.cloudrun_service_account.email}"
 }
 resource "google_project_iam_member" "iam_service_agent" {
   project = var.project_id
   role    = "roles/run.serviceAgent"
-  member  = "serviceAccount:${google_service_account.cloudrun_service_account.email}"
-}
-resource "google_project_iam_member" "iam_secret_accessor" {
-  project = var.project_id
-  role    = "roles/secretmanager.secretAccessor"
   member  = "serviceAccount:${google_service_account.cloudrun_service_account.email}"
 }
 
@@ -53,8 +53,8 @@ resource "google_cloud_run_v2_service" "default" {
       args = [
         "--logtostderr",
         "--v=1",
-        "--bucket=${modules.infra.outputs.log_bucket}",
-        "--spanner=${modules.infra.outputs.log_spanner}",
+        "--bucket=${module.gcp.log_bucket.id}",
+        "--spanner=${module.gcp.log_spanner.id}",
         "--project=${var.project_id}",
         "--signer=./testgcp.sec",
       ]
@@ -80,13 +80,10 @@ resource "google_cloud_run_v2_service" "default" {
   }
   client = "terraform"
   depends_on = [
-    google_project_service.secretmanager_api,
-    google_project_service.spanner_api,
     google_project_iam_member.iam_act_as,
     google_project_iam_member.iam_metrics_writer,
     google_project_iam_member.iam_spanner_client,
     google_project_iam_member.iam_service_agent,
-    google_project_iam_member.iam_secret_accessor,
   ]
 }
 
