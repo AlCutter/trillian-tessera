@@ -94,6 +94,8 @@ resource "google_cloud_run_v2_service" "default" {
   }
   client = "terraform"
   depends_on = [
+    module.gcp,
+    google_project_service.cloudrun_api,
     google_project_iam_member.iam_act_as,
     google_project_iam_member.iam_metrics_writer,
     google_project_iam_member.iam_service_agent,
