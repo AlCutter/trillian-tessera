@@ -3,10 +3,10 @@ terraform {
 }
 
 locals {
+  env         = path_relative_to_include()
   project_id = get_env("GOOGLE_PROJECT", "trillian-tessera")
   location   = get_env("GOOGLE_REGION", "us-central1")
-  base_name   = get_env("TESSERA_BASE_NAME", "example-gcp")
-  env         = path_relative_to_include()
+  base_name   = get_env("TESSERA_BASE_NAME", "${path_relative_to_include()}-example-gcp")
 }
 
 remote_state {
@@ -15,7 +15,7 @@ remote_state {
   config = {
     project  = local.project_id
     location = local.location
-    bucket   = "${local.project_id}-${local.base_name}-${local.env}-terraform-state"
+    bucket   = "${local.project_id}-${local.base_name}-terraform-state"
     prefix   = "${path_relative_to_include()}/terraform.tfstate"
 
     gcs_bucket_labels = {
