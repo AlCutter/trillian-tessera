@@ -29,9 +29,9 @@ resource "google_project_iam_member" "iam_metrics_writer" {
   role    = "roles/monitoring.metricWriter"
   member  = "serviceAccount:${google_service_account.cloudrun_service_account.email}"
 }
-resource "google_project_iam_member" "iam_spanner_client" {
+resource "google_project_iam_member" "iam_spanner_database_user" {
   project = var.project_id
-  role    = "roles/spanner.client"
+  role    = "roles/spanner.databaseUser"
   member  = "serviceAccount:${google_service_account.cloudrun_service_account.email}"
 }
 resource "google_project_iam_member" "iam_service_agent" {
@@ -82,7 +82,7 @@ resource "google_cloud_run_v2_service" "default" {
   depends_on = [
     google_project_iam_member.iam_act_as,
     google_project_iam_member.iam_metrics_writer,
-    google_project_iam_member.iam_spanner_client,
+    google_project_iam_member.iam_spanner_database_user,
     google_project_iam_member.iam_service_agent,
   ]
 }
