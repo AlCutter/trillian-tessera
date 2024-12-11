@@ -506,3 +506,52 @@ func createExclusive(f string, d []byte) error {
 	}
 	return nil
 }
+
+// NewMigrationTarget creates a new POSIX storage for the MigrationTarget lifecycle mode.
+// - path is a directory in which the log should be stored
+// - create must only be set when first creating the log, and will create the directory structure and an empty checkpoint
+func NewMigrationTarget(ctx context.Context, path string, opts ...func(*options.StorageOptions)) (*MigrationStorage, error) {
+	opt := storage.ResolveStorageOptions(opts...)
+
+	r := &MigrationStorage{
+		s: &Storage{
+			path:        path,
+			entriesPath: opt.EntriesPath,
+		},
+	}
+	klog.Infof("Initializing directory for POSIX log at %q", r.s.path)
+	if err := os.MkdirAll(filepath.Join(r.s.path, stateDir), dirPerm); err != nil {
+		return nil, fmt.Errorf("failed to create log directory: %q", err)
+	}
+
+	return r, nil
+}
+
+type MigrationStorage struct {
+	s *Storage
+}
+
+func (m *MigrationStorage) SetTile(ctx context.Context, level, index uint64, partial uint8, tile []byte) error {
+	return m.s.writeTile(ctx, index, level, partial, tile)
+}
+func (m *MigrationStorage) SetEntryBundle(ctx context.Context, index uint64, partial uint8, bundle []byte) error {
+	return m.s.writeBundle(ctx, index, partial, bundle)
+}
+func (m *MigrationStorage) SetState(ctx context.Context, treeSize uint64, rootHash []byte) error {
+	// Double locking:
+	// - The mutex `Lock()` ensures that multiple concurrent calls to this function within a task are serialised.
+	// - The POSIX `lockForTreeUpdate()` ensures that distinct tasks are serialised.
+	m.s.mu.Lock()
+	unlock, err := lockFile(filepath.Join(m.s.path, stateDir, "treeState.lock"))
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		if err := unlock(); err != nil {
+			panic(err)
+		}
+		m.s.mu.Unlock()
+	}()
+
+	return m.s.writeTreeState(treeSize, rootHash)
+}
