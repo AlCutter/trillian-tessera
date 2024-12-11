@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"sync/atomic"
@@ -982,4 +983,67 @@ func (d *dedupStorage) flush(items []interface{}) {
 		return
 	}
 	d.numWrites.Add(uint64(len(entries)))
+}
+
+// NewMigrationTarget creates a new POSIX storage for the MigrationTarget lifecycle mode.
+// - path is a directory in which the log should be stored
+// - create must only be set when first creating the log, and will create the directory structure and an empty checkpoint
+func NewMigrationTarget(ctx context.Context, cfg Config, opts ...func(*options.StorageOptions)) (*MigrationStorage, error) {
+	opt := storage.ResolveStorageOptions(opts...)
+	if opt.PushbackMaxOutstanding == 0 {
+		opt.PushbackMaxOutstanding = DefaultPushbackMaxOutstanding
+	}
+
+	c, err := gcs.NewClient(ctx, gcs.WithJSONReads())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCS client: %v", err)
+	}
+
+	seq, err := newSpannerSequencer(ctx, cfg.Spanner, uint64(opt.PushbackMaxOutstanding))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Spanner sequencer: %v", err)
+	}
+
+	r := &Storage{
+		objStore: &gcsStorage{
+			gcsClient: c,
+			bucket:    cfg.Bucket,
+		},
+		sequencer:   seq,
+		newCP:       opt.NewCP,
+		entriesPath: opt.EntriesPath,
+	}
+
+	if err := r.init(ctx); err != nil {
+		return nil, fmt.Errorf("failed to initialise log storage: %v", err)
+	}
+
+	m := &MigrationStorage{
+		s:      r,
+		dbPool: seq.dbPool,
+	}
+	return m, nil
+}
+
+type MigrationStorage struct {
+	s      *Storage
+	dbPool *spanner.Client
+}
+
+func (m *MigrationStorage) SetTile(ctx context.Context, level, index uint64, partial uint8, tile []byte) error {
+	return m.s.setTile(ctx, index, level, partial, tile)
+}
+func (m *MigrationStorage) SetEntryBundle(ctx context.Context, index uint64, partial uint8, bundle []byte) error {
+	return m.s.setEntryBundle(ctx, index, partial, bundle)
+}
+func (m *MigrationStorage) SetState(ctx context.Context, treeSize uint64, rootHash []byte) error {
+	// Spanner doesn't support UINT64 types, so need to check for overflow here.
+	if treeSize > math.MaxInt64 {
+		return fmt.Errorf("treeSize %d is larger than int64 can contain", treeSize)
+	}
+	_, err := m.dbPool.Apply(ctx, []*spanner.Mutation{
+		spanner.Update("IntCoord", []string{"id", "seq", "rootHash"}, []interface{}{0, int64(treeSize), rootHash}),
+		spanner.Update("SeqCoord", []string{"id", "next"}, []interface{}{0, int64(treeSize)}),
+	})
+	return err
 }
