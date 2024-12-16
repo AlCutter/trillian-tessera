@@ -38,6 +38,7 @@ package ctonly
 import (
 	"crypto/sha256"
 	"errors"
+	"fmt"
 
 	"github.com/transparency-dev/merkle/rfc6962"
 	"golang.org/x/crypto/cryptobyte"
@@ -55,6 +56,94 @@ type Entry struct {
 	Precertificate    []byte
 	IssuerKeyHash     []byte
 	FingerprintsChain [][32]byte
+}
+
+// IntegratedEntry represents an Entry in a Static CT Entry Bundle.
+// This is an Entry plus its location in the log.
+type IntegratedEntry struct {
+	Entry Entry
+	Index uint64
+}
+
+// ParseEntryBundle decodes the entries stored in a Static CT Entry Bundle.
+func ParseEntryBundle(bs []byte) ([]IntegratedEntry, error) {
+	b := cryptobyte.String(bs)
+	r := make([]IntegratedEntry, 0)
+	for i := 0; len(b) > 0; i++ {
+		e, idx, err := readLeafData(&b)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read entry %d of bundle: %v", i, err)
+		}
+		r = append(r, IntegratedEntry{
+			Entry: *e,
+			Index: idx,
+		})
+	}
+	return r, nil
+}
+
+func readLeafData(b *cryptobyte.String) (*Entry, uint64, error) {
+	r := &Entry{}
+
+	if !b.ReadUint64(&r.Timestamp) {
+		return nil, 0, fmt.Errorf("failed to parse timestamp")
+	}
+
+	var leafType uint16
+	if !b.ReadUint16(&leafType) {
+		return nil, 0, fmt.Errorf("failed to parse leaftype")
+	}
+	switch leafType {
+	case 0:
+		r.IsPrecert = false
+		certBytes := cryptobyte.String{}
+		if !b.ReadUint24LengthPrefixed(&certBytes) {
+			return nil, 0, fmt.Errorf("failed to parse certificate")
+		}
+		r.Certificate = certBytes
+	case 1:
+		r.IsPrecert = true
+		if !b.ReadBytes(&r.IssuerKeyHash, sha256.Size) {
+			return nil, 0, fmt.Errorf("failed to read issuer key hash")
+		}
+		tbsBytes := cryptobyte.String{}
+		if !b.ReadUint24LengthPrefixed(&tbsBytes) {
+			return nil, 0, fmt.Errorf("failed to parse TBS")
+		}
+		r.Certificate = tbsBytes
+	default:
+		return nil, 0, fmt.Errorf("unknown leaf type %d", leafType)
+	}
+
+	extB := cryptobyte.String{}
+	if !b.ReadUint16LengthPrefixed(&extB) {
+		return nil, 0, fmt.Errorf("failed to read extension bytes")
+	}
+	idx := &extensions{}
+	if err := idx.Unmarshal(extB); err != nil {
+		return nil, 0, fmt.Errorf("failed to read index: %v", err)
+	}
+
+	if r.IsPrecert {
+		precert := cryptobyte.String{}
+		if !b.ReadUint24LengthPrefixed(&precert) {
+			return nil, 0, fmt.Errorf("failed to read precert bytes")
+		}
+		r.Precertificate = precert
+	}
+
+	fpChain := cryptobyte.String{}
+	if !b.ReadUint16LengthPrefixed(&fpChain) {
+		return nil, 0, fmt.Errorf("failed to read fingerprint chain bytes")
+	}
+	if l := len(fpChain); l%sha256.Size != 0 {
+		return nil, 0, fmt.Errorf("unexpected length of fingerprint chain %d", l)
+	}
+	for ; len(fpChain) > 0; fpChain = fpChain[32:] {
+		r.FingerprintsChain = append(r.FingerprintsChain, [32]byte(fpChain[:32]))
+	}
+
+	return r, idx.LeafIndex, nil
 }
 
 // LeafData returns the data which should be added to an entry bundle for this entry.
@@ -150,6 +239,26 @@ func addExtensions(b *cryptobyte.Builder, leafIndex uint64) {
 // TimestampedEntry, according to c2sp.org/static-ct-api.
 type extensions struct {
 	LeafIndex uint64
+}
+
+func (c *extensions) Unmarshal(bs []byte) error {
+	b := cryptobyte.String(bs)
+	var eType uint8
+	if !b.ReadUint8(&eType) {
+		return fmt.Errorf("failed to read extension type")
+	}
+	if eType != 0 {
+		return fmt.Errorf("unknown extension type %d", eType)
+	}
+	idxS := cryptobyte.String{}
+	if !b.ReadUint16LengthPrefixed(&idxS) {
+		return fmt.Errorf("failed to read index bytes")
+	}
+	if l := len(idxS); l != 5 {
+		return fmt.Errorf("unexpected number of index bytes %d, wanted %d", l, 5)
+	}
+	c.LeafIndex = uint64(idxS[0])<<32 | uint64(idxS[1])<<24 | uint64(idxS[2])<<16 | uint64(idxS[3])<<8 | uint64(idxS[4])
+	return nil
 }
 
 func (c extensions) Marshal() ([]byte, error) {
