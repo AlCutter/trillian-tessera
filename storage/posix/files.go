@@ -518,40 +518,109 @@ func NewMigrationTarget(ctx context.Context, path string, opts ...func(*options.
 			path:        path,
 			entriesPath: opt.EntriesPath,
 		},
+		bundleHashes: opt.BundleHashes,
 	}
 	klog.Infof("Initializing directory for POSIX log at %q", r.s.path)
 	if err := os.MkdirAll(filepath.Join(r.s.path, stateDir), dirPerm); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %q", err)
 	}
 
+	go func(ctx context.Context) {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				from, _, err := r.s.readTreeState()
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					klog.Warningf("readTreeState: %v", err)
+					continue
+				}
+				klog.Infof("Integrate from %d", from)
+				if err := r.integrate(ctx, from); err != nil {
+					klog.Warningf("integrate(%d): %v", from, err)
+				}
+			}
+		}
+
+	}(ctx)
+
 	return r, nil
 }
 
 type MigrationStorage struct {
-	s *Storage
+	s            *Storage
+	bundleHashes options.BundleHashesFunc
 }
 
-func (m *MigrationStorage) SetTile(ctx context.Context, level, index uint64, partial uint8, tile []byte) error {
-	return m.s.writeTile(ctx, index, level, partial, tile)
-}
 func (m *MigrationStorage) SetEntryBundle(ctx context.Context, index uint64, partial uint8, bundle []byte) error {
 	return m.s.writeBundle(ctx, index, partial, bundle)
 }
-func (m *MigrationStorage) SetState(ctx context.Context, treeSize uint64, rootHash []byte) error {
-	// Double locking:
-	// - The mutex `Lock()` ensures that multiple concurrent calls to this function within a task are serialised.
-	// - The POSIX `lockForTreeUpdate()` ensures that distinct tasks are serialised.
-	m.s.mu.Lock()
-	unlock, err := lockFile(filepath.Join(m.s.path, stateDir, "treeState.lock"))
-	if err != nil {
-		panic(err)
-	}
-	defer func() {
-		if err := unlock(); err != nil {
+
+/*
+	func (m *MigrationStorage) SetState(ctx context.Context, treeSize uint64, rootHash []byte) error {
+		// Double locking:
+		// - The mutex `Lock()` ensures that multiple concurrent calls to this function within a task are serialised.
+		// - The POSIX `lockForTreeUpdate()` ensures that distinct tasks are serialised.
+		m.s.mu.Lock()
+		unlock, err := lockFile(filepath.Join(m.s.path, stateDir, "treeState.lock"))
+		if err != nil {
 			panic(err)
 		}
-		m.s.mu.Unlock()
-	}()
+		defer func() {
+			if err := unlock(); err != nil {
+				panic(err)
+			}
+			m.s.mu.Unlock()
+		}()
 
-	return m.s.writeTreeState(treeSize, rootHash)
+		return m.s.writeTreeState(treeSize, rootHash)
+	}
+*/
+func (m *MigrationStorage) GetState(ctx context.Context) (uint64, []byte, error) {
+	return m.s.readTreeState()
+}
+
+func (m *MigrationStorage) integrate(ctx context.Context, from uint64) error {
+	const maxEntries = 1 << 16
+	lh := make([][]byte, 0, maxEntries)
+	added := uint64(0)
+	done := false
+	c := from
+	for c < from+maxEntries && !done {
+		bundleIdx := c / layout.EntryBundleWidth
+		b, err := m.s.ReadEntryBundle(ctx, bundleIdx, 0)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("read bundle %d: %v", bundleIdx, err)
+			}
+			done = true
+			continue
+		}
+		bh, err := m.bundleHashes(b)
+		if err != nil {
+			return fmt.Errorf("failed to calculate bundle hashes for bundle %d: %v", bundleIdx, err)
+		}
+		if p := c % layout.EntryBundleWidth; p != 0 {
+			// We're starting from a partial bundle, so need to try to complete that first.
+			bh = bh[p:]
+		}
+
+		lh = append(lh, bh...)
+		c += uint64(len(bh))
+		added += uint64(len(bh))
+
+	}
+	if len(lh) == 0 {
+		klog.Infof("Integrate: nothing to do, nothing done")
+		return nil
+	}
+	klog.Infof("Integrate: adding %d entries to existing tree size %d", len(lh), from)
+	if err := m.s.doIntegrate(ctx, from, lh); err != nil {
+		return fmt.Errorf("Integrate failed: %v", err)
+	}
+	klog.Infof("Integrate: added %d entries", added)
+	return nil
 }

@@ -80,7 +80,7 @@ func main() {
 		klog.Exitf("Failed to construct storage: %v", err)
 	}
 
-	if err := migrate.Migrate(context.Background(), *stateDB, src.ReadCheckpoint, src.ReadTile, readEntryBundle, st); err != nil {
+	if err := migrate.Migrate(context.Background(), *stateDB, src.ReadCheckpoint, readEntryBundle, st); err != nil {
 		klog.Exitf("Migrate failed: %v", err)
 	}
 }
