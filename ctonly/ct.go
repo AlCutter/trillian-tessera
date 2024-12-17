@@ -82,6 +82,21 @@ func ParseEntryBundle(bs []byte) ([]IntegratedEntry, error) {
 	return r, nil
 }
 
+// EntryBundleHashes calculates the Merkle leaf hashes for all entries in the provided Static CT Bundle.
+func EntryBundleHashes(bs []byte) ([][]byte, error) {
+	b := cryptobyte.String(bs)
+	r := make([][]byte, 0)
+	for i := 0; len(b) > 0; i++ {
+		e, idx, err := readLeafData(&b)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read entry %d of bundle: %v", i, err)
+		}
+		r = append(r, e.MerkleLeafHash(idx))
+	}
+	return r, nil
+
+}
+
 func readLeafData(b *cryptobyte.String) (*Entry, uint64, error) {
 	r := &Entry{}
 

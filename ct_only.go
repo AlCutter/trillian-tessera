@@ -62,10 +62,11 @@ func convertCTEntry(e *ctonly.Entry) *Entry {
 	return r
 }
 
-// WithCTLayout instructs the underlying storage to use a Static CT API compatible scheme for layout.
+// WithCTLayout instructs the underlying storage to operate in a Static CT API compatible fashion.
 func WithCTLayout() func(*options.StorageOptions) {
 	return func(opts *options.StorageOptions) {
 		opts.EntriesPath = ctEntriesPath
+		opts.BundleHashes = ctonly.EntryBundleHashes
 	}
 }
 

@@ -29,6 +29,9 @@ type ParseCPFunc func(raw []byte) (*f_log.Checkpoint, error)
 // EntriesPathFunc is the signature of a function which knows how to format entry bundle paths.
 type EntriesPathFunc func(n uint64, p uint8) string
 
+// BundleHashesFunc is the signture of a function which knows how to compute leaf hashes for all entries in a bundle.
+type BundleHashesFunc func(bundle []byte) ([][]byte, error)
+
 // StorageOptions holds optional settings for all storage implementations.
 type StorageOptions struct {
 	NewCP NewCPFunc
@@ -38,7 +41,8 @@ type StorageOptions struct {
 
 	PushbackMaxOutstanding uint
 
-	EntriesPath EntriesPathFunc
+	EntriesPath  EntriesPathFunc
+	BundleHashes BundleHashesFunc
 
 	CheckpointInterval time.Duration
 }

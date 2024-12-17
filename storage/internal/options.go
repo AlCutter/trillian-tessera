@@ -15,7 +15,11 @@
 package storage
 
 import (
+	"fmt"
+
+	"github.com/transparency-dev/merkle/rfc6962"
 	tessera "github.com/transparency-dev/trillian-tessera"
+	"github.com/transparency-dev/trillian-tessera/api"
 	"github.com/transparency-dev/trillian-tessera/api/layout"
 	"github.com/transparency-dev/trillian-tessera/internal/options"
 )
@@ -26,10 +30,23 @@ func ResolveStorageOptions(opts ...func(*options.StorageOptions)) *options.Stora
 		BatchMaxSize:       tessera.DefaultBatchMaxSize,
 		BatchMaxAge:        tessera.DefaultBatchMaxAge,
 		EntriesPath:        layout.EntriesPath,
+		BundleHashes:       tlogTilesBundleHashes,
 		CheckpointInterval: tessera.DefaultCheckpointInterval,
 	}
 	for _, opt := range opts {
 		opt(defaults)
 	}
 	return defaults
+}
+
+func tlogTilesBundleHashes(bs []byte) ([][]byte, error) {
+	eb := &api.EntryBundle{}
+	if err := eb.UnmarshalText(bs); err != nil {
+		return nil, fmt.Errorf("invalid bundle: %v", err)
+	}
+	r := make([][]byte, len(eb.Entries))
+	for i := range eb.Entries {
+		r[i] = rfc6962.DefaultHasher.HashLeaf(eb.Entries[i])
+	}
+	return r, nil
 }
