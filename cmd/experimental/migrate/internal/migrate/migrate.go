@@ -16,7 +16,6 @@ package migrate
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
@@ -32,7 +31,6 @@ import (
 type migrate struct {
 	storage    MigrationStorage
 	getCP      client.CheckpointFetcherFunc
-	getTile    client.TileFetcherFunc
 	getEntries client.EntryBundleFetcherFunc
 
 	todo chan span
@@ -43,25 +41,22 @@ type migrate struct {
 	bundlesMigrated  atomic.Uint64
 }
 
-// span represents the number of tiles at a given tile-level.
+// span represents the number of entry bundles
 type span struct {
-	level int
 	start uint64
 	N     uint64
 }
 
 type MigrationStorage interface {
-	SetTile(ctx context.Context, level, index uint64, partial uint8, tile []byte) error
 	SetEntryBundle(ctx context.Context, index uint64, partial uint8, bundle []byte) error
-	SetState(ctx context.Context, treeSize uint64, rootHash []byte) error
+	GetState(ctx context.Context) (uint64, []byte, error)
 }
 
-func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcherFunc, getTile client.TileFetcherFunc, getEntries client.EntryBundleFetcherFunc, storage MigrationStorage) error {
+func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcherFunc, getEntries client.EntryBundleFetcherFunc, storage MigrationStorage) error {
 	// TODO store state & resume
 	m := &migrate{
 		storage:    storage,
 		getCP:      getCP,
-		getTile:    getTile,
 		getEntries: getEntries,
 		todo:       make(chan span, 100),
 	}
@@ -76,10 +71,12 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 	if err != nil {
 		return fmt.Errorf("invalid CP size %q: %v", bits[1], err)
 	}
-	rootHash, err := base64.StdEncoding.DecodeString(bits[2])
-	if err != nil {
-		return fmt.Errorf("invalid checkpoint roothash %q: %v", bits[2], err)
-	}
+	/*
+		rootHash, err := base64.StdEncoding.DecodeString(bits[2])
+		if err != nil {
+			return fmt.Errorf("invalid checkpoint roothash %q: %v", bits[2], err)
+		}
+	*/
 
 	// figure out what needs copying
 	go m.populateSpans(size)
@@ -88,17 +85,20 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 	go func() {
 		for {
 			time.Sleep(time.Second)
-			tn := m.tilesMigrated.Load()
-			tnp := float64(tn*100) / float64(m.tilesToMigrate)
 			bn := m.bundlesMigrated.Load()
-			bnp := float64(tn*100) / float64(m.bundlesToMigrate)
-			klog.Infof("tiles: %d (%.2f%%)  bundles: %d (%.2f%%)", tn, tnp, bn, bnp)
+			bnp := float64(bn*100) / float64(m.bundlesToMigrate)
+			s, _, err := m.storage.GetState(ctx)
+			if err != nil {
+				klog.Warningf("GetState: %v", err)
+			}
+			intp := float64(s*100) / float64(size)
+			klog.Infof("integration: %d (%.2f%%)  bundles: %d (%.2f%%)", s, intp, bn, bnp)
 		}
 	}()
 
 	// Do the copying
 	eg := errgroup.Group{}
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < 100; i++ {
 		eg.Go(func() error {
 			return m.migrateRange(ctx)
 
@@ -107,50 +107,24 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 	if err := eg.Wait(); err != nil {
 		return fmt.Errorf("migrate failed to copy resources: %v", err)
 	}
-	return storage.SetState(ctx, size, rootHash)
-}
-
-func calcExpectedCounts(treeSize uint64) (uint64, uint64) {
-	tiles := uint64(0)
-	bundles := uint64(0)
-	levelSize := treeSize
-	for level := 0; levelSize > 0; level++ {
-		numFull, partial := levelSize/layout.TileWidth, levelSize%layout.TileWidth
-		n := numFull
-		if partial > 0 {
-			n++
-		}
-		tiles += n
-		if level == 0 {
-			bundles = n
-		}
-		levelSize >>= layout.TileHeight
-	}
-	return tiles, bundles
+	// TODO, wait for integrate
+	return nil
 }
 
 func (m *migrate) populateSpans(treeSize uint64) {
-	m.tilesToMigrate, m.bundlesToMigrate = calcExpectedCounts(treeSize)
+	m.bundlesToMigrate = treeSize / 256
+	if treeSize%256 > 0 {
+		m.bundlesToMigrate++
+	}
 	klog.Infof("Spans for treeSize %d", treeSize)
 	klog.Infof("total resources to fetch %d tiles + %d bundles = %d", m.tilesToMigrate, m.bundlesToMigrate, m.tilesToMigrate+m.bundlesToMigrate)
 
-	levelSize := treeSize
-	for level := 0; levelSize > 0; level++ {
-		numFull, partial := levelSize/layout.TileWidth, levelSize%layout.TileWidth
-		for j := uint64(0); j < numFull; j++ {
-			m.todo <- span{level: level, start: j, N: layout.TileWidth}
-			if level == 0 {
-				m.todo <- span{level: -1, start: j, N: layout.TileWidth}
-			}
-		}
-		if partial > 0 {
-			m.todo <- span{level: level, start: numFull, N: partial}
-			if level == 0 {
-				m.todo <- span{level: -1, start: numFull, N: partial}
-			}
-
-		}
-		levelSize >>= layout.TileHeight
+	numFull, partial := treeSize/layout.TileWidth, treeSize%layout.TileWidth
+	for j := uint64(0); j < numFull; j++ {
+		m.todo <- span{start: j, N: layout.TileWidth}
+	}
+	if partial > 0 {
+		m.todo <- span{start: numFull, N: partial}
 	}
 	close(m.todo)
 }
@@ -160,25 +134,14 @@ func (m *migrate) migrateRange(ctx context.Context) error {
 		if s.N == layout.TileWidth {
 			s.N = 0
 		}
-		if s.level == -1 {
-			d, err := m.getEntries(ctx, s.start, uint8(s.N))
-			if err != nil {
-				return fmt.Errorf("failed to fetch entrybundle %d (p=%d): %v", s.start, s.N, err)
-			}
-			if err := m.storage.SetEntryBundle(ctx, s.start, uint8(s.N), d); err != nil {
-				return fmt.Errorf("failed to store entrybundle %d (p=%d): %v", s.start, s.N, err)
-			}
-			m.bundlesMigrated.Add(1)
-		} else {
-			d, err := m.getTile(ctx, uint64(s.level), s.start, uint8(s.N))
-			if err != nil {
-				return fmt.Errorf("failed to fetch tile level %d index %d (p=%d): %v", s.level, s.start, s.N, err)
-			}
-			if err := m.storage.SetTile(ctx, uint64(s.level), s.start, uint8(s.N), d); err != nil {
-				return fmt.Errorf("failed to store tile level %d index %d (p=%d): %v", s.level, s.start, s.N, err)
-			}
-			m.tilesMigrated.Add(1)
+		d, err := m.getEntries(ctx, s.start, uint8(s.N))
+		if err != nil {
+			return fmt.Errorf("failed to fetch entrybundle %d (p=%d): %v", s.start, s.N, err)
 		}
+		if err := m.storage.SetEntryBundle(ctx, s.start, uint8(s.N), d); err != nil {
+			return fmt.Errorf("failed to store entrybundle %d (p=%d): %v", s.start, s.N, err)
+		}
+		m.bundlesMigrated.Add(1)
 	}
 	return nil
 }
