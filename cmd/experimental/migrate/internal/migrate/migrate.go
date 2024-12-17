@@ -98,7 +98,7 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 
 	// Do the copying
 	eg := errgroup.Group{}
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 50; i++ {
 		eg.Go(func() error {
 			return m.migrateRange(ctx)
 
