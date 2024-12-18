@@ -371,7 +371,70 @@ func TestPublishCheckpoint(t *testing.T) {
 			}
 		})
 	}
+}
 
+func TestCalcBundleIndicesToAdd(t *testing.T) {
+	for _, test := range []struct {
+		from, to   uint64
+		maxBundles uint64
+		want       []bundleInfo
+	}{
+		{
+			from:       0,
+			to:         256,
+			maxBundles: 1,
+			want: []bundleInfo{
+				{Index: 0},
+			},
+		}, {
+			from:       20,
+			to:         90,
+			maxBundles: 10,
+			want: []bundleInfo{
+				{Index: 0, Tail: 20, N: 90 - 20, Partial: 90},
+			},
+		}, {
+			from:       0,
+			to:         4*256 + 42,
+			maxBundles: 100,
+			want: []bundleInfo{
+				{Index: 0},
+				{Index: 1},
+				{Index: 2},
+				{Index: 3},
+				{Index: 4, N: 42, Partial: 42},
+			},
+		}, {
+			from:       66,
+			to:         4*256 + 42,
+			maxBundles: 100,
+			want: []bundleInfo{
+				{Index: 0, Tail: 66},
+				{Index: 1},
+				{Index: 2},
+				{Index: 3},
+				{Index: 4, N: 42, Partial: 42},
+			},
+		}, {
+			from:       8*256 + 66,
+			to:         8*256 + 70,
+			maxBundles: 100,
+			want: []bundleInfo{
+				{Index: 8, Tail: 66, N: 70 - 66, Partial: 70},
+			},
+		},
+	} {
+		t.Run(fmt.Sprintf("%d->%d", test.from, test.to), func(t *testing.T) {
+			got := make([]bundleInfo, 0)
+			c := calcBundleIndicesToAdd(test.from, test.to, test.maxBundles)
+			for b := range c {
+				got = append(got, b)
+			}
+			if d := cmp.Diff(got, test.want); d != "" {
+				t.Fatalf("got results with diff:\n%s", d)
+			}
+		})
+	}
 }
 
 type memObjStore struct {

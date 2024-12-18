@@ -18,11 +18,13 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	tessera "github.com/transparency-dev/trillian-tessera"
@@ -75,14 +77,28 @@ func main() {
 		return io.ReadAll(rsp.Body)
 	}
 
+	sourceCP, err := src.ReadCheckpoint(ctx)
+	if err != nil {
+		klog.Exitf("fetch initial source checkpoint: %v", err)
+	}
+	bits := strings.Split(string(sourceCP), "\n")
+	sourceSize, err := strconv.ParseUint(bits[1], 10, 64)
+	if err != nil {
+		klog.Exitf("invalid CP size %q: %v", bits[1], err)
+	}
+	sourceRoot, err := base64.StdEncoding.DecodeString(bits[2])
+	if err != nil {
+		klog.Exitf("invalid checkpoint roothash %q: %v", bits[2], err)
+	}
+
 	// Create our Tessera storage backend:
 	gcpCfg := storageConfigFromFlags()
-	st, err := gcp.NewMigrationTarget(ctx, gcpCfg, tessera.WithCTLayout())
+	st, err := gcp.NewMigrationTarget(ctx, gcpCfg, sourceSize, tessera.WithCTLayout())
 	if err != nil {
 		klog.Exitf("Failed to create new GCP storage: %v", err)
 	}
 
-	if err := migrate.Migrate(context.Background(), *stateDB, src.ReadCheckpoint, readEntryBundle, st); err != nil {
+	if err := migrate.Migrate(context.Background(), *stateDB, sourceSize, sourceRoot, readEntryBundle, st); err != nil {
 		klog.Exitf("Migrate failed: %v", err)
 	}
 }

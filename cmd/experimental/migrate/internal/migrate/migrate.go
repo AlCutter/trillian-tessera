@@ -17,10 +17,7 @@ package migrate
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
-	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -32,8 +29,10 @@ import (
 
 type migrate struct {
 	storage    MigrationStorage
-	getCP      client.CheckpointFetcherFunc
 	getEntries client.EntryBundleFetcherFunc
+
+	sourceSize uint64
+	sourceRoot []byte
 
 	todo chan span
 
@@ -54,34 +53,30 @@ type MigrationStorage interface {
 	GetState(ctx context.Context) (uint64, []byte, error)
 }
 
-func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcherFunc, getEntries client.EntryBundleFetcherFunc, storage MigrationStorage) error {
+func Migrate(ctx context.Context, stateDB string, sourceSize uint64, sourceRoot []byte, getEntries client.EntryBundleFetcherFunc, storage MigrationStorage) error {
 	// TODO store state & resume
 	m := &migrate{
 		storage:    storage,
-		getCP:      getCP,
+		sourceSize: sourceSize,
+		sourceRoot: sourceRoot,
 		getEntries: getEntries,
 		todo:       make(chan span, 100),
 	}
 
 	// init
-	cp, err := getCP(ctx)
-	if err != nil {
-		return fmt.Errorf("fetch initial source checkpoint: %v", err)
-	}
-	bits := strings.Split(string(cp), "\n")
-	sourceSize, err := strconv.ParseUint(bits[1], 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid CP size %q: %v", bits[1], err)
-	}
-	sourceRoot, err := base64.StdEncoding.DecodeString(bits[2])
-	if err != nil {
-		return fmt.Errorf("invalid checkpoint roothash %q: %v", bits[2], err)
-	}
-
 	// figure out what needs copying
-	targetSize, _, err := m.storage.GetState(ctx)
+	targetSize, targetRoot, err := m.storage.GetState(ctx)
 	if err != nil {
 		return fmt.Errorf("GetState: %v", err)
+	}
+	if targetSize > sourceSize {
+		return fmt.Errorf("Target size %d > source size %d", targetSize, sourceSize)
+	}
+	if targetSize == sourceSize {
+		if !bytes.Equal(targetRoot, sourceRoot) {
+			return fmt.Errorf("Target root %x != source root %x", targetRoot, sourceRoot)
+		}
+		return nil
 	}
 	go m.populateSpans(targetSize, sourceSize)
 
@@ -102,7 +97,7 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 
 	// Do the copying
 	eg := errgroup.Group{}
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 300; i++ {
 		eg.Go(func() error {
 			return m.migrateRange(ctx)
 
@@ -121,7 +116,7 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 			continue
 		}
 		if is == sourceSize {
-			klog.Infof("Integration complete:\bsource size: %d, source root: %d\ntarget size %d, target root %x", sourceSize, sourceRoot, is, ir)
+			klog.Infof("Integration complete:\bsource size: %d, source root: %x\ntarget size %d, target root %x", sourceSize, sourceRoot, is, ir)
 			if !bytes.Equal(sourceRoot, ir) {
 				klog.Errorf("Source root and target root do not match!")
 			}
@@ -134,6 +129,8 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 // TODO: handle resuming from a partially migrated tree
 func (m *migrate) populateSpans(from, treeSize uint64) {
 	klog.Infof("Spans for entry range [%d, %d)", from, treeSize)
+	defer close(m.todo)
+	defer klog.Infof("total bundles to fetch %d", m.bundlesToMigrate)
 
 	if from%layout.EntryBundleWidth != 0 {
 		m.bundlesToMigrate = 1
@@ -145,19 +142,22 @@ func (m *migrate) populateSpans(from, treeSize uint64) {
 
 	idx := from / layout.EntryBundleWidth
 	if p := from % layout.EntryBundleWidth; p != 0 {
-		m.todo <- span{start: idx, N: layout.EntryBundleWidth - p}
+		if from+layout.EntryBundleWidth > treeSize {
+			s := treeSize % layout.EntryBundleWidth
+			m.todo <- span{start: idx, N: s}
+			return
+		}
+		m.todo <- span{start: idx, N: layout.EntryBundleWidth}
 		idx++
 	}
 
 	for idx < treeSize/layout.EntryBundleWidth {
-		m.todo <- span{start: idx, N: layout.TileWidth}
+		m.todo <- span{start: idx, N: layout.EntryBundleWidth}
 		idx++
 	}
 	if p := treeSize % layout.EntryBundleWidth; p != 0 {
 		m.todo <- span{start: idx, N: p}
 	}
-	close(m.todo)
-	klog.Infof("total bundles to fetch %d", m.bundlesToMigrate)
 }
 
 func (m *migrate) migrateRange(ctx context.Context) error {
