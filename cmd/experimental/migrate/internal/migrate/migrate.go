@@ -79,7 +79,11 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 	}
 
 	// figure out what needs copying
-	go m.populateSpans(sourceSize)
+	targetSize, _, err := m.storage.GetState(ctx)
+	if err != nil {
+		return fmt.Errorf("GetState: %v", err)
+	}
+	go m.populateSpans(targetSize, sourceSize)
 
 	// Print stats
 	go func() {
@@ -128,22 +132,32 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 }
 
 // TODO: handle resuming from a partially migrated tree
-func (m *migrate) populateSpans(treeSize uint64) {
-	m.bundlesToMigrate = treeSize / 256
-	if treeSize%256 > 0 {
+func (m *migrate) populateSpans(from, treeSize uint64) {
+	klog.Infof("Spans for entry range [%d, %d)", from, treeSize)
+
+	if from%layout.EntryBundleWidth != 0 {
+		m.bundlesToMigrate = 1
+	}
+	m.bundlesToMigrate += (treeSize - from) / layout.EntryBundleWidth
+	if treeSize%layout.EntryBundleWidth != 0 {
 		m.bundlesToMigrate++
 	}
-	klog.Infof("Spans for treeSize %d", treeSize)
-	klog.Infof("total resources to fetch %d tiles + %d bundles = %d", m.tilesToMigrate, m.bundlesToMigrate, m.tilesToMigrate+m.bundlesToMigrate)
 
-	numFull, partial := treeSize/layout.TileWidth, treeSize%layout.TileWidth
-	for j := uint64(0); j < numFull; j++ {
-		m.todo <- span{start: j, N: layout.TileWidth}
+	idx := from / layout.EntryBundleWidth
+	if p := from % layout.EntryBundleWidth; p != 0 {
+		m.todo <- span{start: idx, N: layout.EntryBundleWidth - p}
+		idx++
 	}
-	if partial > 0 {
-		m.todo <- span{start: numFull, N: partial}
+
+	for idx < treeSize/layout.EntryBundleWidth {
+		m.todo <- span{start: idx, N: layout.TileWidth}
+		idx++
+	}
+	if p := treeSize % layout.EntryBundleWidth; p != 0 {
+		m.todo <- span{start: idx, N: p}
 	}
 	close(m.todo)
+	klog.Infof("total bundles to fetch %d", m.bundlesToMigrate)
 }
 
 func (m *migrate) migrateRange(ctx context.Context) error {
