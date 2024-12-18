@@ -15,7 +15,9 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
@@ -67,19 +69,17 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 		return fmt.Errorf("fetch initial source checkpoint: %v", err)
 	}
 	bits := strings.Split(string(cp), "\n")
-	size, err := strconv.ParseUint(bits[1], 10, 64)
+	sourceSize, err := strconv.ParseUint(bits[1], 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid CP size %q: %v", bits[1], err)
 	}
-	/*
-		rootHash, err := base64.StdEncoding.DecodeString(bits[2])
-		if err != nil {
-			return fmt.Errorf("invalid checkpoint roothash %q: %v", bits[2], err)
-		}
-	*/
+	sourceRoot, err := base64.StdEncoding.DecodeString(bits[2])
+	if err != nil {
+		return fmt.Errorf("invalid checkpoint roothash %q: %v", bits[2], err)
+	}
 
 	// figure out what needs copying
-	go m.populateSpans(size)
+	go m.populateSpans(sourceSize)
 
 	// Print stats
 	go func() {
@@ -91,7 +91,7 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 			if err != nil {
 				klog.Warningf("GetState: %v", err)
 			}
-			intp := float64(s*100) / float64(size)
+			intp := float64(s*100) / float64(sourceSize)
 			klog.Infof("integration: %d (%.2f%%)  bundles: %d (%.2f%%)", s, intp, bn, bnp)
 		}
 	}()
@@ -108,6 +108,22 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 		return fmt.Errorf("migrate failed to copy resources: %v", err)
 	}
 	// TODO, wait for integrate
+
+	for {
+		time.Sleep(time.Second)
+		is, ir, err := m.storage.GetState(ctx)
+		if err != nil {
+			klog.Warningf("GetState: %v", err)
+			continue
+		}
+		if is == sourceSize {
+			klog.Infof("Integration complete:\bsource size: %d, source root: %d\ntarget size %d, target root %x", sourceSize, sourceRoot, is, ir)
+			if !bytes.Equal(sourceRoot, ir) {
+				klog.Errorf("Source root and target root do not match!")
+			}
+			break
+		}
+	}
 	return nil
 }
 
