@@ -98,7 +98,7 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 
 	// Do the copying
 	eg := errgroup.Group{}
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 500; i++ {
 		eg.Go(func() error {
 			return m.migrateRange(ctx)
 
@@ -111,6 +111,7 @@ func Migrate(ctx context.Context, stateDB string, getCP client.CheckpointFetcher
 	return nil
 }
 
+// TODO: handle resuming from a partially migrated tree
 func (m *migrate) populateSpans(treeSize uint64) {
 	m.bundlesToMigrate = treeSize / 256
 	if treeSize%256 > 0 {

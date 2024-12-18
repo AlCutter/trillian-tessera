@@ -37,6 +37,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -1033,8 +1034,8 @@ func NewMigrationTarget(ctx context.Context, cfg Config, opts ...func(*options.S
 					continue
 				}
 				klog.Infof("Integrate from %d", from)
-				if err := m.integrate(ctx, from); err != nil {
-					klog.Warningf("integrate(%d): %v", from, err)
+				if err := m.integrate(ctx); err != nil {
+					klog.Warningf("integrate: %v", err)
 				}
 			}
 		}
@@ -1056,46 +1057,135 @@ func (m *MigrationStorage) SetEntryBundle(ctx context.Context, index uint64, par
 func (m *MigrationStorage) GetState(ctx context.Context) (uint64, []byte, error) {
 	return m.s.sequencer.currentTree(ctx)
 }
-func (m *MigrationStorage) integrate(ctx context.Context, from uint64) error {
-	const maxEntries = 1 << 16
-	lh := make([][]byte, 0, maxEntries)
-	added := uint64(0)
-	done := false
-	c := from
-	for c < from+maxEntries && !done {
-		bundleIdx := c / layout.EntryBundleWidth
-		klog.V(2).Infof("Read bundle %d", bundleIdx)
-		b, err := m.s.ReadEntryBundle(ctx, bundleIdx, 0)
+
+func calcBundleIndicesToAdd(from uint64, numBundles uint64) (chan uint64, uint8) {
+	r := make(chan uint64, numBundles)
+	p := from % layout.EntryBundleWidth
+	if p > 0 {
+		r <- from / layout.EntryBundleWidth
+		from += p
+		numBundles--
+	}
+	for ; numBundles > 0; numBundles-- {
+		r <- from / layout.EntryBundleWidth
+		from += layout.EntryBundleWidth
+	}
+	close(r)
+	return r, uint8(p)
+}
+
+func (m *MigrationStorage) fetchBundleHashes(ctx context.Context, bundleIdx uint64) ([][]byte, error) {
+	klog.V(2).Infof("Read bundle %d", bundleIdx)
+	b, err := m.s.ReadEntryBundle(ctx, bundleIdx, 0)
+	if err != nil {
+		if !errors.Is(err, gcs.ErrObjectNotExist) {
+			return nil, fmt.Errorf("read bundle %d: %v", bundleIdx, err)
+		}
+		return nil, nil
+	}
+	klog.V(2).Infof("Calculate hashes %d", bundleIdx)
+	bh, err := m.bundleHashes(b)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate bundle hashes for bundle %d: %v", bundleIdx, err)
+	}
+	return bh, nil
+}
+
+func (m *MigrationStorage) integrate(ctx context.Context) error {
+	const maxEntries = 1 << 17
+	const workers = 20
+
+	_, err := m.dbPool.ReadWriteTransaction(ctx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
+		// Figure out which is the starting index of sequenced entries to start consuming from.
+		row, err := txn.ReadRowWithOptions(ctx, "IntCoord", spanner.Key{0}, []string{"seq", "rootHash"}, &spanner.ReadOptions{LockHint: spannerpb.ReadRequest_LOCK_HINT_EXCLUSIVE})
 		if err != nil {
-			if !errors.Is(err, gcs.ErrObjectNotExist) {
-				return fmt.Errorf("read bundle %d: %v", bundleIdx, err)
+			return err
+		}
+		var fromSeq int64 // Spanner doesn't support uint64
+		var rootHash []byte
+		if err := row.Columns(&fromSeq, &rootHash); err != nil {
+			return fmt.Errorf("failed to read integration coordination info: %v", err)
+		}
+
+		from := uint64(fromSeq)
+		klog.V(1).Infof("Integrating from %d", from)
+
+		lh := make([][]byte, 0, maxEntries)
+		toBeAdded := sync.Map{}
+		bi, firstP := calcBundleIndicesToAdd(from, maxEntries/layout.EntryBundleWidth)
+		if len(bi) == 0 {
+			return nil
+		}
+
+		errG := errgroup.Group{}
+		klog.V(1).Infof("Fetching %d bundles for integrate", len(bi))
+		if firstP > 0 {
+			first := <-bi
+			errG.Go(func() error {
+				bh, err := m.fetchBundleHashes(ctx, first)
+				if err != nil {
+					return fmt.Errorf("failed to read bundle %d: %v", first, err)
+				}
+				if bh == nil {
+					return nil
+				}
+				// We're starting from a partial bundle, so need to try to complete that first.
+				bh = bh[firstP:]
+				toBeAdded.Store(first, bh)
+				return nil
+			})
+		}
+		for range workers {
+			errG.Go(func() error {
+				for idx := range bi {
+					bh, err := m.fetchBundleHashes(ctx, idx)
+					if err != nil {
+						return fmt.Errorf("failed to read bundle %d: %v", idx, err)
+					}
+					if bh == nil {
+						// We encountered a missing tile, no point in continuing to fetch more tiles
+						return nil
+					}
+					toBeAdded.Store(idx, bh)
+				}
+				return nil
+			})
+		}
+		if err := errG.Wait(); err != nil {
+			return err
+		}
+		klog.V(1).Infof("Fetched bundles for integrate")
+
+		added := uint64(0)
+		for c := from; ; {
+			bundleIdx := c / layout.EntryBundleWidth
+			v, ok := toBeAdded.Load(bundleIdx)
+			if !ok {
+				break
 			}
-			done = true
-			continue
+			bh := v.([][]byte)
+			lh = append(lh, bh...)
+			c += uint64(len(bh))
+			added += uint64(len(bh))
+
 		}
-		klog.V(2).Infof("Calculate hashes %d", bundleIdx)
-		bh, err := m.bundleHashes(b)
+		if len(lh) == 0 {
+			klog.Infof("Integrate: nothing to do, nothing done")
+			return nil
+		}
+		klog.Infof("Integrate: adding %d entries to existing tree size %d", len(lh), from)
+		newRoot, err := m.s.integrate(ctx, from, lh)
 		if err != nil {
-			return fmt.Errorf("failed to calculate bundle hashes for bundle %d: %v", bundleIdx, err)
+			klog.Warningf("integrate failed: %v", err)
+			return fmt.Errorf("Integrate failed: %v", err)
 		}
-		if p := c % layout.EntryBundleWidth; p != 0 {
-			// We're starting from a partial bundle, so need to try to complete that first.
-			bh = bh[p:]
-		}
+		klog.Infof("Integrate: added %d entries", added)
 
-		lh = append(lh, bh...)
-		c += uint64(len(bh))
-		added += uint64(len(bh))
+		// integration was successful, so we can update our coordination row
+		m := make([]*spanner.Mutation, 0)
+		m = append(m, spanner.Update("IntCoord", []string{"id", "seq", "rootHash"}, []interface{}{0, int64(from + added), newRoot}))
+		return txn.BufferWrite(m)
+	})
 
-	}
-	if len(lh) == 0 {
-		klog.Infof("Integrate: nothing to do, nothing done")
-		return nil
-	}
-	klog.Infof("Integrate: adding %d entries to existing tree size %d", len(lh), from)
-	if _, err := m.s.integrate(ctx, from, lh); err != nil {
-		return fmt.Errorf("Integrate failed: %v", err)
-	}
-	klog.Infof("Integrate: added %d entries", added)
-	return nil
+	return err
 }
