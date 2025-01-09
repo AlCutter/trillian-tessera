@@ -15,7 +15,6 @@
 package migrate
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"sync/atomic"
@@ -51,7 +50,8 @@ type span struct {
 
 type MigrationStorage interface {
 	SetEntryBundle(ctx context.Context, index uint64, partial uint8, bundle []byte) error
-	GetState(ctx context.Context) (uint64, []byte, error)
+	AwaitIntegration(ctx context.Context) error
+	Size(ctx context.Context) (uint64, error)
 }
 
 func Migrate(ctx context.Context, stateDB string, sourceSize uint64, sourceRoot []byte, getEntries client.EntryBundleFetcherFunc, storage MigrationStorage) error {
@@ -65,18 +65,14 @@ func Migrate(ctx context.Context, stateDB string, sourceSize uint64, sourceRoot 
 	}
 
 	// init
-	// figure out what needs copying
-	targetSize, targetRoot, err := m.storage.GetState(ctx)
+	targetSize, err := m.storage.Size(ctx)
 	if err != nil {
-		return fmt.Errorf("GetState: %v", err)
+		return fmt.Errorf("Size: %v", err)
 	}
 	if targetSize > sourceSize {
 		return fmt.Errorf("Target size %d > source size %d", targetSize, sourceSize)
 	}
 	if targetSize == sourceSize {
-		if !bytes.Equal(targetRoot, sourceRoot) {
-			return fmt.Errorf("Target root %x != source root %x", targetRoot, sourceRoot)
-		}
 		return nil
 	}
 	go m.populateSpans(targetSize, sourceSize)
@@ -87,9 +83,9 @@ func Migrate(ctx context.Context, stateDB string, sourceSize uint64, sourceRoot 
 			time.Sleep(time.Second)
 			bn := m.bundlesMigrated.Load()
 			bnp := float64(bn*100) / float64(m.bundlesToMigrate)
-			s, _, err := m.storage.GetState(ctx)
+			s, err := m.storage.Size(ctx)
 			if err != nil {
-				klog.Warningf("GetState: %v", err)
+				klog.Warningf("Size: %v", err)
 			}
 			intp := float64(s*100) / float64(sourceSize)
 			klog.Infof("integration: %d (%.2f%%)  bundles: %d (%.2f%%)", s, intp, bn, bnp)
@@ -107,22 +103,9 @@ func Migrate(ctx context.Context, stateDB string, sourceSize uint64, sourceRoot 
 	if err := eg.Wait(); err != nil {
 		return fmt.Errorf("migrate failed to copy resources: %v", err)
 	}
-	// TODO, wait for integrate
 
-	for {
-		time.Sleep(time.Second)
-		is, ir, err := m.storage.GetState(ctx)
-		if err != nil {
-			klog.Warningf("GetState: %v", err)
-			continue
-		}
-		if is == sourceSize {
-			klog.Infof("Integration complete:\bsource size: %d, source root: %x\ntarget size %d, target root %x", sourceSize, sourceRoot, is, ir)
-			if !bytes.Equal(sourceRoot, ir) {
-				klog.Errorf("Source root and target root do not match!")
-			}
-			break
-		}
+	if err := m.storage.AwaitIntegration(ctx); err != nil {
+		klog.Exitf("Migration failed: %v", err)
 	}
 	return nil
 }

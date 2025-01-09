@@ -93,7 +93,7 @@ func main() {
 
 	// Create our Tessera storage backend:
 	gcpCfg := storageConfigFromFlags()
-	st, err := gcp.NewMigrationTarget(ctx, gcpCfg, sourceSize, tessera.WithCTLayout())
+	st, err := gcp.NewMigrationTarget(ctx, gcpCfg, sourceSize, sourceRoot, tessera.WithCTLayout())
 	if err != nil {
 		klog.Exitf("Failed to create new GCP storage: %v", err)
 	}

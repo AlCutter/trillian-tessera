@@ -988,7 +988,7 @@ func (d *dedupStorage) flush(items []interface{}) {
 // NewMigrationTarget creates a new POSIX storage for the MigrationTarget lifecycle mode.
 // - path is a directory in which the log should be stored
 // - create must only be set when first creating the log, and will create the directory structure and an empty checkpoint
-func NewMigrationTarget(ctx context.Context, cfg Config, sourceSize uint64, opts ...func(*options.StorageOptions)) (*MigrationStorage, error) {
+func NewMigrationTarget(ctx context.Context, cfg Config, sourceSize uint64, sourceRoot []byte, opts ...func(*options.StorageOptions)) (*MigrationStorage, error) {
 	opt := storage.ResolveStorageOptions(opts...)
 	if opt.PushbackMaxOutstanding == 0 {
 		opt.PushbackMaxOutstanding = DefaultPushbackMaxOutstanding
@@ -1019,34 +1019,8 @@ func NewMigrationTarget(ctx context.Context, cfg Config, sourceSize uint64, opts
 		dbPool:       seq.dbPool,
 		bundleHashes: opt.BundleHashes,
 		sourceSize:   sourceSize,
+		sourceRoot:   sourceRoot,
 	}
-
-	go func(ctx context.Context) {
-		t := time.NewTicker(time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				from, _, err := r.sequencer.currentTree(ctx)
-				if err != nil && !errors.Is(err, os.ErrNotExist) {
-					klog.Warningf("readTreeState: %v", err)
-					continue
-				}
-				klog.Infof("Integrate from %d (Target %d)", from, m.sourceSize)
-				newSize, newRoot, err := m.integrate(ctx)
-				if err != nil {
-					klog.Warningf("integrate: %v", err)
-				}
-				if newSize == m.sourceSize {
-					klog.Infof("Integrated to %d with roothash %x", newSize, newRoot)
-					return
-				}
-			}
-		}
-
-	}(ctx)
 
 	return m, nil
 }
@@ -1056,13 +1030,45 @@ type MigrationStorage struct {
 	dbPool       *spanner.Client
 	bundleHashes options.BundleHashesFunc
 	sourceSize   uint64
+	sourceRoot   []byte
+}
+
+func (m *MigrationStorage) AwaitIntegration(ctx context.Context) error {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			from, _, err := m.s.sequencer.currentTree(ctx)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				klog.Warningf("readTreeState: %v", err)
+				continue
+			}
+			klog.Infof("Integrate from %d (Target %d)", from, m.sourceSize)
+			newSize, newRoot, err := m.integrate(ctx)
+			if err != nil {
+				klog.Warningf("integrate: %v", err)
+			}
+			if newSize == m.sourceSize {
+				klog.Infof("Integrated to %d with roothash %x", newSize, newRoot)
+				if !bytes.Equal(newRoot, m.sourceRoot) {
+					return fmt.Errorf("local roothash %x != sourceRoot %x", newRoot, m.sourceRoot)
+				}
+				return nil
+			}
+		}
+	}
 }
 
 func (m *MigrationStorage) SetEntryBundle(ctx context.Context, index uint64, partial uint8, bundle []byte) error {
 	return m.s.setEntryBundle(ctx, index, partial, bundle)
 }
-func (m *MigrationStorage) GetState(ctx context.Context) (uint64, []byte, error) {
-	return m.s.sequencer.currentTree(ctx)
+
+func (m *MigrationStorage) Size(ctx context.Context) (uint64, error) {
+	s, _, err := m.s.sequencer.currentTree(ctx)
+	return s, err
 }
 
 type bundleInfo struct {
