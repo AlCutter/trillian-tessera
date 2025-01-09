@@ -6,6 +6,7 @@ require (
 	cloud.google.com/go/spanner v1.73.0
 	cloud.google.com/go/storage v1.49.0
 	github.com/RobinUS2/golang-moving-average v1.0.0
+	github.com/avast/retry-go/v4 v4.6.0
 	github.com/aws/aws-sdk-go-v2 v1.32.7
 	github.com/aws/aws-sdk-go-v2/config v1.28.7
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.48

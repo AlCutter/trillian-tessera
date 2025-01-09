@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/avast/retry-go/v4"
 	"github.com/transparency-dev/trillian-tessera/api/layout"
 	"github.com/transparency-dev/trillian-tessera/client"
 	"golang.org/x/sync/errgroup"
@@ -162,17 +163,22 @@ func (m *migrate) populateSpans(from, treeSize uint64) {
 
 func (m *migrate) migrateRange(ctx context.Context) error {
 	for s := range m.todo {
-		if s.N == layout.TileWidth {
-			s.N = 0
-		}
-		d, err := m.getEntries(ctx, s.start, uint8(s.N))
-		if err != nil {
-			return fmt.Errorf("failed to fetch entrybundle %d (p=%d): %v", s.start, s.N, err)
-		}
-		if err := m.storage.SetEntryBundle(ctx, s.start, uint8(s.N), d); err != nil {
-			return fmt.Errorf("failed to store entrybundle %d (p=%d): %v", s.start, s.N, err)
-		}
-		m.bundlesMigrated.Add(1)
+		retry.Do(func() error {
+			if s.N == layout.TileWidth {
+				s.N = 0
+			}
+			d, err := m.getEntries(ctx, s.start, uint8(s.N))
+			if err != nil {
+				return fmt.Errorf("failed to fetch entrybundle %d (p=%d): %v", s.start, s.N, err)
+			}
+			if err := m.storage.SetEntryBundle(ctx, s.start, uint8(s.N), d); err != nil {
+				return fmt.Errorf("failed to store entrybundle %d (p=%d): %v", s.start, s.N, err)
+			}
+			m.bundlesMigrated.Add(1)
+			return nil
+		},
+			retry.Attempts(10),
+			retry.DelayType(retry.BackOffDelay))
 	}
 	return nil
 }
