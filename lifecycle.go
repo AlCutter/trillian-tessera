@@ -87,7 +87,11 @@ func WithAppendDeduplication(decorators ...func(AddFn) AddFn) func(*AppendOption
 	}
 }
 
-// AppendOptions holds optional settings for all storage implementations.
+type MigrationOptions struct {
+	EntriesPath func(n uint64, p uint8) string
+}
+
+// AppendOptions holds settings for all storage implementations.
 type AppendOptions struct {
 	// NewCP knows how to format and sign checkpoints.
 	NewCP func(size uint64, hash []byte) ([]byte, error)
@@ -119,4 +123,29 @@ func resolveAppendOptions(opts ...func(*AppendOptions)) *AppendOptions {
 		opt(defaults)
 	}
 	return defaults
+}
+
+// NewMigrationTarget returns a MigrationTarget, which allows tlog-tiles and Static CT compatible
+// logs to be migrated to a Tessera instance.
+//
+// decorators provides a list of optional constructor functions that will return decorators
+// that wrap the base appender. This can be used to provide deduplication. Decorators will be
+// called in-order, and the last in the chain will be the base appender.
+func NewAppender(ctx context.Context, d Driver, opts ...func(*AppendOptions)) (*Appender, LogReader, error) {
+	resolved := resolveAppendOptions(opts...)
+	type appendLifecycle interface {
+		Appender(context.Context, *AppendOptions) (*Appender, LogReader, error)
+	}
+	lc, ok := d.(appendLifecycle)
+	if !ok {
+		return nil, nil, fmt.Errorf("driver %T does not implement Appender lifecycle", d)
+	}
+	a, r, err := lc.Appender(ctx, resolved)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to init appender lifecycle: %v", err)
+	}
+	for i := len(resolved.AddDecorators) - 1; i >= 0; i-- {
+		a.Add = resolved.AddDecorators[i](a.Add)
+	}
+	return a, r, nil
 }
